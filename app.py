@@ -1,3 +1,4 @@
+import os
 import json
 import pandas as pd
 import psycopg2
@@ -6,24 +7,36 @@ import google.generativeai as genai
 
 st.set_page_config(page_title="Calorie Tracker", page_icon="🍽️", layout="centered")
 
-# ---------- CONFIG (Secrets) ----------
-GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
-DB_URL = st.secrets.get("DB_URL", "")
+# ---------- CONFIG (Vercel + Streamlit compatible) ----------
+
+def get_env(key: str, default: str = "") -> str:
+    """
+    Priority:
+    1) Vercel / system env vars
+    2) Streamlit secrets
+    """
+    return os.environ.get(key) or st.secrets.get(key, default)
+
+GEMINI_API_KEY = get_env("GEMINI_API_KEY")
+DB_URL = get_env("DB_URL")
 
 if not GEMINI_API_KEY or not DB_URL:
-    st.warning("Missing secrets. Add GEMINI_API_KEY and DB_URL in Streamlit secrets.")
+    st.error(
+        "Missing configuration.\n\n"
+        "Set GEMINI_API_KEY and DB_URL in Vercel Environment Variables "
+        "or Streamlit secrets."
+    )
     st.stop()
 
 genai.configure(api_key=GEMINI_API_KEY)
 MODEL_NAME = "gemini-2.5-flash"
 
-# Store all entries under one user (since login removed)
+# Store all entries under one user
 DEFAULT_USER_EMAIL = "default"
 
 # ---------- DB ----------
 def db_conn():
     return psycopg2.connect(DB_URL)
-
 def insert_entry(user_email: str, raw_text: str) -> int:
     with db_conn() as conn:
         with conn.cursor() as cur:

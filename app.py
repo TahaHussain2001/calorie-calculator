@@ -86,10 +86,9 @@ def set_bg(image_path: str):
             unsafe_allow_html=True,
         )
     except FileNotFoundError:
-        st.warning("Background image not found. Put it at: assets/bg.jpg")
+        st.warning("Background image not found. Put it at: bg.jpg")
 
 set_bg("bg.jpg")
-
 
 # ---------------- DB ----------------
 def db_conn():
@@ -193,26 +192,29 @@ def fetch_last_7_days_totals(user_email: str) -> pd.DataFrame:
     if not first_day:
         return pd.DataFrame()
 
-    today = pd.Timestamp.utcnow().date()
+    # Use DB's CURRENT_DATE instead of utcnow() mismatch
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT CURRENT_DATE;")
+            today = cur.fetchone()[0]
 
     days_since_start = (today - first_day).days
-    if days_since_start < 6:
-        start_day = first_day
-    else:
-        start_day = today - pd.Timedelta(days=6)
+    start_day = first_day if days_since_start < 6 else (today - pd.Timedelta(days=6))
 
+    # IMPORTANT: totals come from meal_items (not from meal_entries)
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT
-                  e.created_at::date as day,
-                  COALESCE(SUM(e.total_calories), 0) as total_calories,
-                  COALESCE(SUM(e.total_protein_g), 0) as total_protein_g,
-                  COALESCE(SUM(e.total_carbs_g), 0) as total_carbs_g,
-                  COALESCE(SUM(e.total_fat_g), 0) as total_fat_g,
-                  COUNT(*) as meals_logged
+                  e.created_at::date AS day,
+                  COALESCE(SUM(i.calories), 0) AS total_calories,
+                  COALESCE(SUM(i.protein_g), 0) AS total_protein_g,
+                  COALESCE(SUM(i.carbs_g), 0) AS total_carbs_g,
+                  COALESCE(SUM(i.fat_g), 0) AS total_fat_g,
+                  COUNT(DISTINCT e.id) AS meals_logged
                 FROM meal_entries e
+                LEFT JOIN meal_items i ON i.entry_id = e.id
                 WHERE e.user_email = %s
                   AND e.created_at::date >= %s
                   AND e.created_at::date <= %s
@@ -243,7 +245,6 @@ def fetch_last_7_days_totals(user_email: str) -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     return df
-
 
 # ---------------- GEMINI PARSER ----------------
 def parse_meal(text: str) -> dict:
@@ -297,13 +298,18 @@ User text: "{text}"
             raise ValueError("Gemini did not return JSON.")
         return json.loads(raw[start:end + 1])
 
+# ---------------- DEMO CALLBACK ----------------
+def fill_demo():
+    st.session_state["food_text"] = "2 paratha, chai 1 cup, chicken karahi 1 bowl"
 
 # ---------------- APP UI ----------------
 st.markdown('<div class="hero-title">🍽️ Calorie Tracker</div>', unsafe_allow_html=True)
-st.markdown('<div class="hero-subtitle">Type what you ate. Get calories + macros (estimated) instantly.</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="hero-subtitle">Type what you ate. Get calories + macros (estimated) instantly.</div>',
+    unsafe_allow_html=True
+)
 
 with st.container():
-    st.markdown('<div class="glass">', unsafe_allow_html=True)
 
     cA, cB = st.columns([1, 1])
     with cA:
@@ -312,25 +318,20 @@ with st.container():
         protein_target = st.number_input("Protein target (g)", min_value=0, max_value=400, value=120, step=5)
 
     st.subheader("Add what you ate")
-    food_text = st.text_area(
+
+    st.text_area(
         "Example: 2 paratha, chai 1 cup, chicken karahi 1 bowl",
         height=90,
+        key="food_text",
     )
 
     col1, col2, col3 = st.columns([1, 1, 1])
     with col1:
         add_btn = st.button("Add meal", use_container_width=True)
     with col2:
-        demo_btn = st.button("Use demo text", use_container_width=True)
+        st.button("Use demo text", use_container_width=True, on_click=fill_demo)
     with col3:
         test_db_btn = st.button("Test DB", use_container_width=True)
-
-    if demo_btn:
-        st.session_state["demo_text"] = "2 paratha, chai 1 cup, chicken karahi 1 bowl"
-        st.rerun()
-
-    if "demo_text" in st.session_state and not food_text:
-        food_text = st.session_state["demo_text"]
 
     if test_db_btn:
         try:
@@ -343,14 +344,17 @@ with st.container():
 
     st.markdown("</div>", unsafe_allow_html=True)
 
+# Read current textbox value
+current_text = st.session_state.get("food_text", "")
+
 if add_btn:
-    if not food_text.strip():
+    if not current_text.strip():
         st.error("Type your food first.")
     else:
         with st.spinner("Estimating calories + macros with Gemini..."):
-            parsed = parse_meal(food_text.strip())
+            parsed = parse_meal(current_text.strip())
 
-        entry_id = insert_entry(DEFAULT_USER_EMAIL, food_text.strip())
+        entry_id = insert_entry(DEFAULT_USER_EMAIL, current_text.strip())
         insert_items(entry_id, parsed.get("items", []))
 
         st.success("Saved ✅")

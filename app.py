@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+from datetime import datetime, date, time
 from typing import List, Dict, Optional
 
 import pandas as pd
@@ -8,10 +9,7 @@ import psycopg2
 import streamlit as st
 import google.generativeai as genai
 
-# ---------------- APP CONFIG ----------------
 st.set_page_config(page_title="Calorie Tracker", page_icon="🍽️", layout="centered")
-
-APP_TZ = "Asia/Karachi"  # ✅ fixes "27th vs 28th" day mismatch
 
 # ---------------- CONFIG ----------------
 def get_env(key: str, default: str = "") -> str:
@@ -31,7 +29,7 @@ if not GEMINI_API_KEY or not DB_URL:
 genai.configure(api_key=GEMINI_API_KEY)
 MODEL_NAME = "gemini-2.5-flash"
 
-DEFAULT_USER_EMAIL = "default"  # all entries under one user for now
+DEFAULT_USER_EMAIL = "default"  # only you
 
 # ---------------- UI THEME / BACKGROUND ----------------
 def set_bg(image_path: str):
@@ -95,20 +93,21 @@ set_bg("bg.jpg")
 
 # ---------------- DB ----------------
 def db_conn():
-    # ✅ Force DB session timezone so NOW()/CURRENT_DATE align with PKT
-    return psycopg2.connect(
-        DB_URL,
-        sslmode="require",
-        connect_timeout=10,
-        options=f"-c timezone={APP_TZ}",
-    )
+    return psycopg2.connect(DB_URL, sslmode="require", connect_timeout=10)
 
-def insert_entry(user_email: str, raw_text: str) -> int:
+def insert_entry(user_email: str, raw_text: str, log_date: date, log_time: time) -> int:
+    # ✅ created_at is built from the date you select + time you select
+    created_at = datetime.combine(log_date, log_time)
+
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO meal_entries (user_email, raw_text) VALUES (%s, %s) RETURNING id",
-                (user_email, raw_text),
+                """
+                INSERT INTO meal_entries (user_email, raw_text, created_at)
+                VALUES (%s, %s, %s)
+                RETURNING id
+                """,
+                (user_email, raw_text, created_at),
             )
             entry_id = cur.fetchone()[0]
             conn.commit()
@@ -146,8 +145,7 @@ def insert_items(entry_id: int, items: List[Dict]):
             )
             conn.commit()
 
-def fetch_today_items(user_email: str):
-    # ✅ Use PKT day boundaries (via session timezone + NOW()::date)
+def fetch_day_items(user_email: str, day: date):
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -155,10 +153,10 @@ def fetch_today_items(user_email: str):
                 SELECT e.id, e.created_at, e.raw_text
                 FROM meal_entries e
                 WHERE e.user_email = %s
-                  AND e.created_at::date = NOW()::date
+                  AND e.created_at::date = %s
                 ORDER BY e.created_at DESC
                 """,
-                (user_email,),
+                (user_email, day),
             )
             entries = cur.fetchall()
 
@@ -183,8 +181,7 @@ def fetch_today_items(user_email: str):
     )
     return entries_df, items_df
 
-def get_first_meal_date(user_email: str) -> Optional[pd.Timestamp]:
-    # ✅ Use PKT day boundaries (session timezone applies)
+def get_first_meal_date(user_email: str) -> Optional[date]:
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -203,16 +200,12 @@ def fetch_last_7_days_totals(user_email: str) -> pd.DataFrame:
     if not first_day:
         return pd.DataFrame()
 
-    # ✅ Today in PKT (session timezone applies)
-    with db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT NOW()::date;")
-            today = cur.fetchone()[0]
+    # ✅ "today" comes from the console machine
+    today = datetime.now().date()
 
     days_since_start = (today - first_day).days
     start_day = first_day if days_since_start < 6 else (today - pd.Timedelta(days=6))
 
-    # ✅ Group by PKT day (session timezone applies)
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -249,8 +242,7 @@ def fetch_last_7_days_totals(user_email: str) -> pd.DataFrame:
     )
 
     full_days = pd.date_range(start=start_day, end=today, freq="D").date
-    full_df = pd.DataFrame({"day": full_days})
-    df = full_df.merge(df, on="day", how="left").fillna(0)
+    df = pd.DataFrame({"day": full_days}).merge(df, on="day", how="left").fillna(0)
 
     for col in ["total_calories", "total_protein_g", "total_carbs_g", "total_fat_g", "meals_logged"]:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
@@ -321,6 +313,15 @@ st.markdown(
 )
 
 with st.container():
+    # ✅ Manual date option (and optional time)
+    st.subheader("Log settings")
+    s1, s2 = st.columns([1, 1])
+
+    with s1:
+        log_date = st.date_input("Log date", value=datetime.now().date())
+    with s2:
+        log_time = st.time_input("Log time", value=datetime.now().time().replace(microsecond=0))
+
     cA, cB = st.columns([1, 1])
     with cA:
         target_kcal = st.number_input("Daily calorie target", min_value=800, max_value=5000, value=2000, step=50)
@@ -347,8 +348,8 @@ with st.container():
         try:
             with db_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("select now(), current_date;")
-                    st.success(f"DB NOW/CURRENT_DATE (PKT session): {cur.fetchone()}")
+                    cur.execute("select now();")
+                    st.success(f"DB OK: {cur.fetchone()[0]}")
         except Exception as e:
             st.error(e)
 
@@ -362,10 +363,11 @@ if add_btn:
         with st.spinner("Estimating calories + macros with Gemini..."):
             parsed = parse_meal(current_text.strip())
 
-        entry_id = insert_entry(DEFAULT_USER_EMAIL, current_text.strip())
+        # ✅ save using manual date/time
+        entry_id = insert_entry(DEFAULT_USER_EMAIL, current_text.strip(), log_date, log_time)
         insert_items(entry_id, parsed.get("items", []))
 
-        st.success("Saved ✅")
+        st.success(f"Saved ✅ (Logged on {log_date} {log_time})")
         assumptions = parsed.get("assumptions", [])
         if assumptions:
             st.caption("Assumptions: " + "; ".join(assumptions[:3]))
@@ -405,13 +407,13 @@ else:
 
 st.divider()
 
-# ---------------- TODAY (DETAIL) ----------------
-entries_df, items_df = fetch_today_items(DEFAULT_USER_EMAIL)
+# ---------------- SELECTED DAY (DETAIL) ----------------
+st.subheader(f"Details for {log_date}")
 
-st.subheader("Today (Details)")
+entries_df, items_df = fetch_day_items(DEFAULT_USER_EMAIL, log_date)
 
 if items_df.empty:
-    st.write("No meals logged today.")
+    st.write("No meals logged for this date.")
 else:
     for col in ["calories", "protein_g", "carbs_g", "fat_g", "confidence"]:
         items_df[col] = pd.to_numeric(items_df[col], errors="coerce").fillna(0)

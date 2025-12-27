@@ -315,7 +315,7 @@ with st.container():
     with cA:
         target_kcal = st.number_input("Daily calorie target", min_value=800, max_value=5000, value=2000, step=50)
     with cB:
-        protein_target = st.number_input("Protein target (g)", min_value=0, max_value=400, value=120, step=5)
+        protein_target = st.number_input("Protein target (g)", min_value=0, max_value=400, value=90, step=5)
 
     st.subheader("Add what you ate")
 
@@ -446,3 +446,4 @@ else:
                 ["name", "quantity", "unit", "calories", "protein_g", "carbs_g", "fat_g", "confidence"]
             ].copy()
             st.dataframe(show, use_container_width=True, hide_index=True)
+

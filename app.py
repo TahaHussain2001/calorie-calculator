@@ -36,56 +36,70 @@ MODEL_NAME = "gemini-2.5-flash"
 DEFAULT_USER_EMAIL = "default"  # only you
 
 # ---------------- UI THEME / BACKGROUND ----------------
-st.markdown(
-    f"""
-    <style>
-    .stApp {{
-        background:
-            linear-gradient(rgba(0,0,0,.70), rgba(0,0,0,.75)),
-            url("data:image/jpg;base64,{b64}");
-        background-size: cover;
-        background-position: center;
-        background-attachment: fixed;
-    }}
+def set_bg(image_path: str):
+    try:
+        with open(image_path, "rb") as f:
+            data = f.read()
+        b64 = base64.b64encode(data).decode("utf-8")
 
-    .block-container {{
-        padding-top: 2rem !important;
-        padding-bottom: 2rem !important;
-    }}
+        st.markdown(
+            f"""
+            <style>
+            .stApp {{
+                background:
+                    linear-gradient(rgba(0,0,0,.70), rgba(0,0,0,.75)),
+                    url("data:image/jpg;base64,{b64}");
+                background-size: cover;
+                background-position: center;
+                background-attachment: fixed;
+            }}
 
-    .hero-title {{
-        font-size: 42px;
-        font-weight: 800;
-        color: #fff;
-        margin: 0 0 6px 0;
-    }}
+            .block-container {{
+                padding-top: 2rem !important;
+                padding-bottom: 2rem !important;
+            }}
 
-    .hero-subtitle {{
-        color: rgba(255,255,255,0.85);
-        font-size: 16px;
-        margin: 0 0 16px 0;
-    }}
+            .hero-title {{
+                font-size: 42px;
+                font-weight: 800;
+                color: #fff;
+                margin: 0 0 6px 0;
+            }}
 
-    label, .stMarkdown, .stText {{
-        color: rgba(255,255,255,0.92) !important;
-    }}
+            .hero-subtitle {{
+                color: rgba(255,255,255,0.85);
+                font-size: 16px;
+                margin: 0 0 16px 0;
+            }}
 
-    textarea, input {{
-        border-radius: 12px !important;
-    }}
+            label, .stMarkdown, .stText {{
+                color: rgba(255,255,255,0.92) !important;
+            }}
 
-    /* ---- Align "Save targets" button with number inputs ---- */
-    .save-targets-btn {{
-        margin-top: 26px; /* adjust 22–30 if needed */
-    }}
+            textarea, input {{
+                border-radius: 12px !important;
+            }}
 
-    .save-targets-btn .stButton > button {{
-        height: 42px;
-    }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+            /* ---- Align "Save targets" button with number inputs ---- */
+            .save-targets-btn {{
+                margin-top: 26px; /* adjust 22–30 if needed */
+            }}
+
+            .save-targets-btn .stButton > button {{
+                height: 42px;
+            }}
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    except FileNotFoundError:
+        st.warning("Background image not found. Put it at: bg.jpg")
+    except Exception as e:
+        st.error(f"Background CSS error: {e}")
+
+set_bg("bg.jpg")
+
 
 # ---------------- DB ----------------
 def db_conn():
@@ -523,6 +537,7 @@ else:
                 ["name", "quantity", "unit", "calories", "protein_g", "carbs_g", "fat_g", "confidence"]
             ].copy()
             st.dataframe(show, use_container_width=True, hide_index=True)
+
 
 
 

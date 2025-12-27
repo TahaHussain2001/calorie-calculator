@@ -1,7 +1,9 @@
+# app.py
 import os
 import json
 import base64
 from datetime import datetime, date, time
+from zoneinfo import ZoneInfo
 from typing import List, Dict, Optional
 
 import pandas as pd
@@ -9,11 +11,14 @@ import psycopg2
 import streamlit as st
 import google.generativeai as genai
 
+# ---------------- APP CONFIG ----------------
 st.set_page_config(page_title="Calorie Tracker", page_icon="🍽️", layout="centered")
+
+# ✅ Since only you use it, we hard-set your local timezone here
+LOCAL_TZ = ZoneInfo("Asia/Karachi")
 
 # ---------------- CONFIG ----------------
 def get_env(key: str, default: str = "") -> str:
-    # Priority: system env vars -> Streamlit secrets
     return os.environ.get(key) or st.secrets.get(key, default)
 
 GEMINI_API_KEY = get_env("GEMINI_API_KEY")
@@ -55,14 +60,6 @@ def set_bg(image_path: str):
                 padding-bottom: 2rem !important;
             }}
 
-            .glass {{
-                background: rgba(255,255,255,0.08);
-                border: 1px solid rgba(255,255,255,0.16);
-                border-radius: 18px;
-                padding: 18px 18px;
-                backdrop-filter: blur(10px);
-            }}
-
             .hero-title {{
                 font-size: 42px;
                 font-weight: 800;
@@ -95,19 +92,35 @@ set_bg("bg.jpg")
 def db_conn():
     return psycopg2.connect(DB_URL, sslmode="require", connect_timeout=10)
 
-def insert_entry(user_email: str, raw_text: str, log_date: date, log_time: time) -> int:
-    # ✅ created_at is built from the date you select + time you select
-    created_at = datetime.combine(log_date, log_time)
-
+def insert_entry(
+    user_email: str,
+    raw_text: str,
+    created_at_local: datetime,
+    totals: Dict[str, float],
+) -> int:
+    """
+    meal_entries.created_at is timestamptz in Supabase.
+    We send a timezone-aware datetime; Postgres stores UTC but keeps the correct moment.
+    """
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO meal_entries (user_email, raw_text, created_at)
-                VALUES (%s, %s, %s)
+                INSERT INTO meal_entries
+                  (user_email, raw_text, created_at,
+                   total_calories, total_protein_g, total_carbs_g, total_fat_g)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
-                (user_email, raw_text, created_at),
+                (
+                    user_email,
+                    raw_text,
+                    created_at_local,
+                    float(totals.get("total_calories", 0) or 0),
+                    float(totals.get("total_protein_g", 0) or 0),
+                    float(totals.get("total_carbs_g", 0) or 0),
+                    float(totals.get("total_fat_g", 0) or 0),
+                ),
             )
             entry_id = cur.fetchone()[0]
             conn.commit()
@@ -138,14 +151,19 @@ def insert_items(entry_id: int, items: List[Dict]):
             cur.executemany(
                 """
                 INSERT INTO meal_items
-                (entry_id, name, quantity, unit, calories, protein_g, carbs_g, fat_g, confidence)
+                  (entry_id, name, quantity, unit,
+                   calories, protein_g, carbs_g, fat_g, confidence)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """,
                 rows,
             )
             conn.commit()
 
-def fetch_day_items(user_email: str, day: date):
+def fetch_day_items(user_email: str, day_local: date):
+    """
+    day_local is your local date (PK time).
+    Since created_at is timestamptz, we convert it to your local timezone for date comparison.
+    """
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -153,10 +171,10 @@ def fetch_day_items(user_email: str, day: date):
                 SELECT e.id, e.created_at, e.raw_text
                 FROM meal_entries e
                 WHERE e.user_email = %s
-                  AND e.created_at::date = %s
+                  AND (e.created_at AT TIME ZONE 'Asia/Karachi')::date = %s
                 ORDER BY e.created_at DESC
                 """,
-                (user_email, day),
+                (user_email, day_local),
             )
             entries = cur.fetchall()
 
@@ -181,37 +199,20 @@ def fetch_day_items(user_email: str, day: date):
     )
     return entries_df, items_df
 
-def get_first_meal_date(user_email: str) -> Optional[date]:
-    with db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT MIN(created_at::date)
-                FROM meal_entries
-                WHERE user_email = %s
-                """,
-                (user_email,),
-            )
-            row = cur.fetchone()
-    return row[0] if row and row[0] else None
-
 def fetch_last_7_days_totals(user_email: str) -> pd.DataFrame:
-    first_day = get_first_meal_date(user_email)
-    if not first_day:
-        return pd.DataFrame()
-
-    # ✅ "today" comes from the console machine
-    today = datetime.now().date()
-
-    days_since_start = (today - first_day).days
-    start_day = first_day if days_since_start < 6 else (today - pd.Timedelta(days=6))
+    """
+    7-day chart based on your local timezone date boundaries.
+    Uses meal_items sums (source of truth).
+    """
+    today_local = datetime.now(LOCAL_TZ).date()
+    start_local = today_local - pd.Timedelta(days=6)
 
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT
-                  e.created_at::date AS day,
+                  (e.created_at AT TIME ZONE 'Asia/Karachi')::date AS day,
                   COALESCE(SUM(i.calories), 0) AS total_calories,
                   COALESCE(SUM(i.protein_g), 0) AS total_protein_g,
                   COALESCE(SUM(i.carbs_g), 0) AS total_carbs_g,
@@ -220,28 +221,21 @@ def fetch_last_7_days_totals(user_email: str) -> pd.DataFrame:
                 FROM meal_entries e
                 LEFT JOIN meal_items i ON i.entry_id = e.id
                 WHERE e.user_email = %s
-                  AND e.created_at::date >= %s
-                  AND e.created_at::date <= %s
+                  AND (e.created_at AT TIME ZONE 'Asia/Karachi')::date >= %s
+                  AND (e.created_at AT TIME ZONE 'Asia/Karachi')::date <= %s
                 GROUP BY day
                 ORDER BY day ASC
                 """,
-                (user_email, start_day, today),
+                (user_email, start_local, today_local),
             )
             rows = cur.fetchall()
 
     df = pd.DataFrame(
         rows,
-        columns=[
-            "day",
-            "total_calories",
-            "total_protein_g",
-            "total_carbs_g",
-            "total_fat_g",
-            "meals_logged",
-        ],
+        columns=["day", "total_calories", "total_protein_g", "total_carbs_g", "total_fat_g", "meals_logged"],
     )
 
-    full_days = pd.date_range(start=start_day, end=today, freq="D").date
+    full_days = pd.date_range(start=start_local, end=today_local, freq="D").date
     df = pd.DataFrame({"day": full_days}).merge(df, on="day", how="left").fillna(0)
 
     for col in ["total_calories", "total_protein_g", "total_carbs_g", "total_fat_g", "meals_logged"]:
@@ -312,48 +306,41 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-with st.container():
-    # ✅ Manual date option (and optional time)
-    st.subheader("Log settings")
-    s1, s2 = st.columns([1, 1])
+# ✅ manual date/time for logging (defaults to your local machine time)
+st.subheader("Log settings")
+d1, d2 = st.columns(2)
 
-    with s1:
-        log_date = st.date_input("Log date", value=datetime.now().date())
-    with s2:
-        log_time = st.time_input("Log time", value=datetime.now().time().replace(microsecond=0))
+now_local = datetime.now(LOCAL_TZ)
+with d1:
+    log_date = st.date_input("Log date", value=now_local.date())
+with d2:
+    log_time = st.time_input("Log time", value=now_local.time().replace(microsecond=0))
 
-    cA, cB = st.columns([1, 1])
-    with cA:
-        target_kcal = st.number_input("Daily calorie target", min_value=800, max_value=5000, value=2000, step=50)
-    with cB:
-        protein_target = st.number_input("Protein target (g)", min_value=0, max_value=400, value=120, step=5)
+st.subheader("Add what you ate")
 
-    st.subheader("Add what you ate")
+st.text_area(
+    "Example: 2 paratha, chai 1 cup, chicken karahi 1 bowl",
+    height=90,
+    key="food_text",
+)
 
-    st.text_area(
-        "Example: 2 paratha, chai 1 cup, chicken karahi 1 bowl",
-        height=90,
-        key="food_text",
-    )
+col1, col2, col3 = st.columns([1, 1, 1])
+with col1:
+    add_btn = st.button("Add meal", use_container_width=True)
+with col2:
+    st.button("Use demo text", use_container_width=True, on_click=fill_demo)
+with col3:
+    test_db_btn = st.button("Test DB", use_container_width=True)
 
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col1:
-        add_btn = st.button("Add meal", use_container_width=True)
-    with col2:
-        st.button("Use demo text", use_container_width=True, on_click=fill_demo)
-    with col3:
-        test_db_btn = st.button("Test DB", use_container_width=True)
+if test_db_btn:
+    try:
+        with db_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("select now();")
+                st.success(f"DB OK: {cur.fetchone()[0]}")
+    except Exception as e:
+        st.error(e)
 
-    if test_db_btn:
-        try:
-            with db_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("select now();")
-                    st.success(f"DB OK: {cur.fetchone()[0]}")
-        except Exception as e:
-            st.error(e)
-
-# Read current textbox value
 current_text = st.session_state.get("food_text", "")
 
 if add_btn:
@@ -363,11 +350,20 @@ if add_btn:
         with st.spinner("Estimating calories + macros with Gemini..."):
             parsed = parse_meal(current_text.strip())
 
-        # ✅ save using manual date/time
-        entry_id = insert_entry(DEFAULT_USER_EMAIL, current_text.strip(), log_date, log_time)
+        # ✅ Build a timezone-aware datetime from your selected date/time
+        created_at_local = datetime.combine(log_date, log_time).replace(tzinfo=LOCAL_TZ)
+
+        totals = {
+            "total_calories": parsed.get("total_calories", 0),
+            "total_protein_g": parsed.get("total_protein_g", 0),
+            "total_carbs_g": parsed.get("total_carbs_g", 0),
+            "total_fat_g": parsed.get("total_fat_g", 0),
+        }
+
+        entry_id = insert_entry(DEFAULT_USER_EMAIL, current_text.strip(), created_at_local, totals)
         insert_items(entry_id, parsed.get("items", []))
 
-        st.success(f"Saved ✅ (Logged on {log_date} {log_time})")
+        st.success(f"Saved ✅ (Logged: {log_date} {log_time})")
         assumptions = parsed.get("assumptions", [])
         if assumptions:
             st.caption("Assumptions: " + "; ".join(assumptions[:3]))
@@ -398,7 +394,6 @@ else:
 
     show_week = week_df.copy()
     show_week["day"] = show_week["day"].astype(str)
-
     st.dataframe(
         show_week[["day", "meals_logged", "total_calories", "total_protein_g", "total_carbs_g", "total_fat_g"]],
         use_container_width=True,
@@ -423,20 +418,11 @@ else:
     total_c = float(items_df["carbs_g"].sum())
     total_f = float(items_df["fat_g"].sum())
 
-    kcal_progress = min(1.0, max(0.0, total_kcal / float(target_kcal)))
-    p_progress = 1.0 if protein_target == 0 else min(1.0, max(0.0, total_p / float(protein_target)))
-
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Calories", f"{total_kcal:.0f} kcal")
     m2.metric("Protein", f"{total_p:.0f} g")
     m3.metric("Carbs", f"{total_c:.0f} g")
     m4.metric("Fat", f"{total_f:.0f} g")
-
-    st.caption("Calories progress")
-    st.progress(kcal_progress)
-
-    st.caption("Protein progress")
-    st.progress(p_progress)
 
     st.write("Meals")
     for _, row in entries_df.iterrows():

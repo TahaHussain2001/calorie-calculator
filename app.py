@@ -86,6 +86,22 @@ def set_bg(image_path: str):
         st.warning("Background image not found. Put it at: bg.jpg")
 
 set_bg("bg.jpg")
+st.markdown(
+    """
+    <style>
+      /* Targets row: push the button down to align with number inputs */
+      .targets-row [data-testid="stButton"] {
+          margin-top: 26px;
+      }
+
+      /* Small tweak: remove extra top padding that some themes add */
+      .targets-row .stButton > button {
+          height: 42px; /* optional, looks closer to input height */
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ---------------- DB ----------------
 def db_conn():
@@ -352,6 +368,8 @@ if "target_kcal" not in st.session_state or st.session_state.get("_targets_for_d
     st.session_state["_targets_for_date"] = log_date
 
 st.subheader("Daily targets (for selected date)")
+
+st.markdown('<div class="targets-row">', unsafe_allow_html=True)
 t1, t2, t3 = st.columns([1, 1, 1])
 
 with t1:
@@ -362,6 +380,7 @@ with t1:
         step=50,
         key="target_kcal",
     )
+
 with t2:
     st.number_input(
         "Protein target (g)",
@@ -370,6 +389,7 @@ with t2:
         step=5,
         key="protein_target",
     )
+
 with t3:
     if st.button("Save targets", use_container_width=True):
         upsert_daily_targets(
@@ -379,6 +399,9 @@ with t3:
             st.session_state["protein_target"],
         )
         st.success("Targets saved ✅")
+
+st.markdown("</div>", unsafe_allow_html=True)
+
 
 st.subheader("Add what you ate")
 
@@ -510,3 +533,4 @@ else:
                 ["name", "quantity", "unit", "calories", "protein_g", "carbs_g", "fat_g", "confidence"]
             ].copy()
             st.dataframe(show, use_container_width=True, hide_index=True)
+

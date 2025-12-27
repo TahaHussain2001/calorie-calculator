@@ -8,7 +8,10 @@ import psycopg2
 import streamlit as st
 import google.generativeai as genai
 
+# ---------------- APP CONFIG ----------------
 st.set_page_config(page_title="Calorie Tracker", page_icon="🍽️", layout="centered")
+
+APP_TZ = "Asia/Karachi"  # ✅ fixes "27th vs 28th" day mismatch
 
 # ---------------- CONFIG ----------------
 def get_env(key: str, default: str = "") -> str:
@@ -92,7 +95,13 @@ set_bg("bg.jpg")
 
 # ---------------- DB ----------------
 def db_conn():
-    return psycopg2.connect(DB_URL, sslmode="require", connect_timeout=10)
+    # ✅ Force DB session timezone so NOW()/CURRENT_DATE align with PKT
+    return psycopg2.connect(
+        DB_URL,
+        sslmode="require",
+        connect_timeout=10,
+        options=f"-c timezone={APP_TZ}",
+    )
 
 def insert_entry(user_email: str, raw_text: str) -> int:
     with db_conn() as conn:
@@ -138,6 +147,7 @@ def insert_items(entry_id: int, items: List[Dict]):
             conn.commit()
 
 def fetch_today_items(user_email: str):
+    # ✅ Use PKT day boundaries (via session timezone + NOW()::date)
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -145,7 +155,7 @@ def fetch_today_items(user_email: str):
                 SELECT e.id, e.created_at, e.raw_text
                 FROM meal_entries e
                 WHERE e.user_email = %s
-                  AND e.created_at::date = CURRENT_DATE
+                  AND e.created_at::date = NOW()::date
                 ORDER BY e.created_at DESC
                 """,
                 (user_email,),
@@ -174,6 +184,7 @@ def fetch_today_items(user_email: str):
     return entries_df, items_df
 
 def get_first_meal_date(user_email: str) -> Optional[pd.Timestamp]:
+    # ✅ Use PKT day boundaries (session timezone applies)
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -192,16 +203,16 @@ def fetch_last_7_days_totals(user_email: str) -> pd.DataFrame:
     if not first_day:
         return pd.DataFrame()
 
-    # Use DB's CURRENT_DATE instead of utcnow() mismatch
+    # ✅ Today in PKT (session timezone applies)
     with db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT CURRENT_DATE;")
+            cur.execute("SELECT NOW()::date;")
             today = cur.fetchone()[0]
 
     days_since_start = (today - first_day).days
     start_day = first_day if days_since_start < 6 else (today - pd.Timedelta(days=6))
 
-    # IMPORTANT: totals come from meal_items (not from meal_entries)
+    # ✅ Group by PKT day (session timezone applies)
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -310,12 +321,11 @@ st.markdown(
 )
 
 with st.container():
-
     cA, cB = st.columns([1, 1])
     with cA:
         target_kcal = st.number_input("Daily calorie target", min_value=800, max_value=5000, value=2000, step=50)
     with cB:
-        protein_target = st.number_input("Protein target (g)", min_value=0, max_value=400, value=90, step=5)
+        protein_target = st.number_input("Protein target (g)", min_value=0, max_value=400, value=120, step=5)
 
     st.subheader("Add what you ate")
 
@@ -337,12 +347,10 @@ with st.container():
         try:
             with db_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("select now();")
-                    st.success(f"DB OK: {cur.fetchone()[0]}")
+                    cur.execute("select now(), current_date;")
+                    st.success(f"DB NOW/CURRENT_DATE (PKT session): {cur.fetchone()}")
         except Exception as e:
             st.error(e)
-
-    st.markdown("</div>", unsafe_allow_html=True)
 
 # Read current textbox value
 current_text = st.session_state.get("food_text", "")
@@ -446,4 +454,3 @@ else:
                 ["name", "quantity", "unit", "calories", "protein_g", "carbs_g", "fat_g", "confidence"]
             ].copy()
             st.dataframe(show, use_container_width=True, hide_index=True)
-

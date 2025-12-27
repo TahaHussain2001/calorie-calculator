@@ -1,10 +1,9 @@
-# app.py
 import os
 import json
 import base64
 from datetime import datetime, date, time
 from zoneinfo import ZoneInfo
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 import pandas as pd
 import psycopg2
@@ -14,8 +13,8 @@ import google.generativeai as genai
 # ---------------- APP CONFIG ----------------
 st.set_page_config(page_title="Calorie Tracker", page_icon="🍽️", layout="centered")
 
-# ✅ Since only you use it, we hard-set your local timezone here
 LOCAL_TZ = ZoneInfo("Asia/Karachi")
+TZ_NAME = "Asia/Karachi"
 
 # ---------------- CONFIG ----------------
 def get_env(key: str, default: str = "") -> str:
@@ -92,16 +91,53 @@ set_bg("bg.jpg")
 def db_conn():
     return psycopg2.connect(DB_URL, sslmode="require", connect_timeout=10)
 
+# ---------- Daily Targets (per date) ----------
+def get_daily_targets(user_email: str, target_date: date) -> Tuple[int, int]:
+    """
+    Returns (target_kcal, protein_target_g) for a specific date.
+    If missing, returns defaults (2000, 120).
+    """
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT target_kcal, protein_target_g
+                FROM daily_targets
+                WHERE user_email = %s AND target_date = %s
+                """,
+                (user_email, target_date),
+            )
+            row = cur.fetchone()
+
+    if row:
+        return int(row[0]), int(row[1])
+
+    return 2000, 120
+
+def upsert_daily_targets(user_email: str, target_date: date, target_kcal: int, protein_target_g: int):
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO daily_targets (user_email, target_date, target_kcal, protein_target_g)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (user_email, target_date)
+                DO UPDATE SET
+                    target_kcal = EXCLUDED.target_kcal,
+                    protein_target_g = EXCLUDED.protein_target_g,
+                    updated_at = NOW()
+                """,
+                (user_email, target_date, int(target_kcal), int(protein_target_g)),
+            )
+            conn.commit()
+
+# ---------- Meals ----------
 def insert_entry(
     user_email: str,
     raw_text: str,
     created_at_local: datetime,
     totals: Dict[str, float],
 ) -> int:
-    """
-    meal_entries.created_at is timestamptz in Supabase.
-    We send a timezone-aware datetime; Postgres stores UTC but keeps the correct moment.
-    """
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -160,21 +196,17 @@ def insert_items(entry_id: int, items: List[Dict]):
             conn.commit()
 
 def fetch_day_items(user_email: str, day_local: date):
-    """
-    day_local is your local date (PK time).
-    Since created_at is timestamptz, we convert it to your local timezone for date comparison.
-    """
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT e.id, e.created_at, e.raw_text
                 FROM meal_entries e
                 WHERE e.user_email = %s
-                  AND (e.created_at AT TIME ZONE 'Asia/Karachi')::date = %s
+                  AND (e.created_at AT TIME ZONE %s)::date = %s
                 ORDER BY e.created_at DESC
                 """,
-                (user_email, day_local),
+                (user_email, TZ_NAME, day_local),
             )
             entries = cur.fetchall()
 
@@ -200,19 +232,15 @@ def fetch_day_items(user_email: str, day_local: date):
     return entries_df, items_df
 
 def fetch_last_7_days_totals(user_email: str) -> pd.DataFrame:
-    """
-    7-day chart based on your local timezone date boundaries.
-    Uses meal_items sums (source of truth).
-    """
     today_local = datetime.now(LOCAL_TZ).date()
     start_local = today_local - pd.Timedelta(days=6)
 
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
-                  (e.created_at AT TIME ZONE 'Asia/Karachi')::date AS day,
+                  (e.created_at AT TIME ZONE %s)::date AS day,
                   COALESCE(SUM(i.calories), 0) AS total_calories,
                   COALESCE(SUM(i.protein_g), 0) AS total_protein_g,
                   COALESCE(SUM(i.carbs_g), 0) AS total_carbs_g,
@@ -221,12 +249,12 @@ def fetch_last_7_days_totals(user_email: str) -> pd.DataFrame:
                 FROM meal_entries e
                 LEFT JOIN meal_items i ON i.entry_id = e.id
                 WHERE e.user_email = %s
-                  AND (e.created_at AT TIME ZONE 'Asia/Karachi')::date >= %s
-                  AND (e.created_at AT TIME ZONE 'Asia/Karachi')::date <= %s
+                  AND (e.created_at AT TIME ZONE %s)::date >= %s
+                  AND (e.created_at AT TIME ZONE %s)::date <= %s
                 GROUP BY day
                 ORDER BY day ASC
                 """,
-                (user_email, start_local, today_local),
+                (TZ_NAME, user_email, TZ_NAME, start_local, TZ_NAME, today_local),
             )
             rows = cur.fetchall()
 
@@ -302,19 +330,55 @@ def fill_demo():
 # ---------------- APP UI ----------------
 st.markdown('<div class="hero-title">🍽️ Calorie Tracker</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="hero-subtitle">Type what you ate. Get calories + macros (estimated) instantly.</div>',
+    '<div class="hero-subtitle">Log meals on any date. Save daily calorie/protein targets.</div>',
     unsafe_allow_html=True
 )
 
-# ✅ manual date/time for logging (defaults to your local machine time)
+# ✅ Manual date/time for logging + viewing
 st.subheader("Log settings")
-d1, d2 = st.columns(2)
-
 now_local = datetime.now(LOCAL_TZ)
+
+d1, d2 = st.columns(2)
 with d1:
     log_date = st.date_input("Log date", value=now_local.date())
 with d2:
     log_time = st.time_input("Log time", value=now_local.time().replace(microsecond=0))
+
+# ✅ Load targets for this selected day into session state (so switching date loads new targets)
+day_targets = get_daily_targets(DEFAULT_USER_EMAIL, log_date)
+if "target_kcal" not in st.session_state or st.session_state.get("_targets_for_date") != log_date:
+    st.session_state["target_kcal"] = day_targets[0]
+    st.session_state["protein_target"] = day_targets[1]
+    st.session_state["_targets_for_date"] = log_date
+
+st.subheader("Daily targets (for selected date)")
+t1, t2, t3 = st.columns([1, 1, 1])
+
+with t1:
+    st.number_input(
+        "Daily calorie target",
+        min_value=800,
+        max_value=5000,
+        step=50,
+        key="target_kcal",
+    )
+with t2:
+    st.number_input(
+        "Protein target (g)",
+        min_value=0,
+        max_value=400,
+        step=5,
+        key="protein_target",
+    )
+with t3:
+    if st.button("Save targets", use_container_width=True):
+        upsert_daily_targets(
+            DEFAULT_USER_EMAIL,
+            log_date,
+            st.session_state["target_kcal"],
+            st.session_state["protein_target"],
+        )
+        st.success("Targets saved ✅")
 
 st.subheader("Add what you ate")
 
@@ -350,7 +414,7 @@ if add_btn:
         with st.spinner("Estimating calories + macros with Gemini..."):
             parsed = parse_meal(current_text.strip())
 
-        # ✅ Build a timezone-aware datetime from your selected date/time
+        # timezone-aware datetime for timestamptz
         created_at_local = datetime.combine(log_date, log_time).replace(tzinfo=LOCAL_TZ)
 
         totals = {
@@ -381,14 +445,10 @@ if week_df.empty:
 else:
     wk_kcal = float(week_df["total_calories"].sum())
     wk_p = float(week_df["total_protein_g"].sum())
-    wk_c = float(week_df["total_carbs_g"].sum())
-    wk_f = float(week_df["total_fat_g"].sum())
 
-    a1, a2, a3, a4 = st.columns(4)
+    a1, a2 = st.columns(2)
     a1.metric("7-day calories", f"{wk_kcal:.0f} kcal")
     a2.metric("7-day protein", f"{wk_p:.0f} g")
-    a3.metric("7-day carbs", f"{wk_c:.0f} g")
-    a4.metric("7-day fat", f"{wk_f:.0f} g")
 
     st.line_chart(week_df.set_index("day")[["total_calories"]])
 
@@ -415,14 +475,22 @@ else:
 
     total_kcal = float(items_df["calories"].sum())
     total_p = float(items_df["protein_g"].sum())
-    total_c = float(items_df["carbs_g"].sum())
-    total_f = float(items_df["fat_g"].sum())
 
-    m1, m2, m3, m4 = st.columns(4)
+    target_kcal = float(st.session_state.get("target_kcal", 2000))
+    protein_target = float(st.session_state.get("protein_target", 120))
+
+    kcal_progress = min(1.0, max(0.0, total_kcal / target_kcal)) if target_kcal > 0 else 0.0
+    p_progress = min(1.0, max(0.0, total_p / protein_target)) if protein_target > 0 else 0.0
+
+    m1, m2 = st.columns(2)
     m1.metric("Calories", f"{total_kcal:.0f} kcal")
     m2.metric("Protein", f"{total_p:.0f} g")
-    m3.metric("Carbs", f"{total_c:.0f} g")
-    m4.metric("Fat", f"{total_f:.0f} g")
+
+    st.caption(f"Calories progress (target {int(target_kcal)} kcal)")
+    st.progress(kcal_progress)
+
+    st.caption(f"Protein progress (target {int(protein_target)} g)")
+    st.progress(p_progress)
 
     st.write("Meals")
     for _, row in entries_df.iterrows():

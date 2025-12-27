@@ -36,65 +36,56 @@ MODEL_NAME = "gemini-2.5-flash"
 DEFAULT_USER_EMAIL = "default"  # only you
 
 # ---------------- UI THEME / BACKGROUND ----------------
-def set_bg(image_path: str):
-    try:
-        with open(image_path, "rb") as f:
-            data = f.read()
-        b64 = base64.b64encode(data).decode()
+st.markdown(
+    f"""
+    <style>
+    .stApp {{
+        background:
+            linear-gradient(rgba(0,0,0,.70), rgba(0,0,0,.75)),
+            url("data:image/jpg;base64,{b64}");
+        background-size: cover;
+        background-position: center;
+        background-attachment: fixed;
+    }}
 
-        st.markdown(
-            f"""
-            <style>
-            .stApp {{
-                background:
-                    linear-gradient(rgba(0,0,0,.70), rgba(0,0,0,.75)),
-                    url("data:image/jpg;base64,{b64}");
-                background-size: cover;
-                background-position: center;
-                background-attachment: fixed;
-            }}
+    .block-container {{
+        padding-top: 2rem !important;
+        padding-bottom: 2rem !important;
+    }}
 
-            .block-container {{
-                padding-top: 2rem !important;
-                padding-bottom: 2rem !important;
-            }}
+    .hero-title {{
+        font-size: 42px;
+        font-weight: 800;
+        color: #fff;
+        margin: 0 0 6px 0;
+    }}
 
-            .hero-title {{
-                font-size: 42px;
-                font-weight: 800;
-                color: #fff;
-                margin: 0 0 6px 0;
-            }}
-            .hero-subtitle {{
-                color: rgba(255,255,255,0.85);
-                font-size: 16px;
-                margin: 0 0 16px 0;
-            }}
+    .hero-subtitle {{
+        color: rgba(255,255,255,0.85);
+        font-size: 16px;
+        margin: 0 0 16px 0;
+    }}
 
-            label, .stMarkdown, .stText {{
-                color: rgba(255,255,255,0.92) !important;
-            }}
+    label, .stMarkdown, .stText {{
+        color: rgba(255,255,255,0.92) !important;
+    }}
 
-            textarea, input {{
-                border-radius: 12px !important;
-            }}
-              /* Targets row: push the button down to align with number inputs */
-      .targets-row [data-testid="stButton"] {
-          margin-top: 26px;
-      }
+    textarea, input {{
+        border-radius: 12px !important;
+    }}
 
-      /* Small tweak: remove extra top padding that some themes add */
-      .targets-row .stButton > button {
-          height: 42px; /* optional, looks closer to input height */
-      }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-    except FileNotFoundError:
-        st.warning("Background image not found. Put it at: bg.jpg")
+    /* ---- Align "Save targets" button with number inputs ---- */
+    .save-targets-btn {{
+        margin-top: 26px; /* adjust 22–30 if needed */
+    }}
 
-set_bg("bg.jpg")
+    .save-targets-btn .stButton > button {{
+        height: 42px;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ---------------- DB ----------------
 def db_conn():
@@ -362,7 +353,6 @@ if "target_kcal" not in st.session_state or st.session_state.get("_targets_for_d
 
 st.subheader("Daily targets (for selected date)")
 
-st.markdown('<div class="targets-row">', unsafe_allow_html=True)
 t1, t2, t3 = st.columns([1, 1, 1])
 
 with t1:
@@ -384,6 +374,12 @@ with t2:
     )
 
 with t3:
+    # Wrapper just for button styling (this DOES work)
+    st.markdown('<div class="save-targets-btn">', unsafe_allow_html=True)
+
+    # Small spacer fallback (keeps alignment stable in all Streamlit versions)
+    st.write("")
+
     if st.button("Save targets", use_container_width=True):
         upsert_daily_targets(
             DEFAULT_USER_EMAIL,
@@ -393,7 +389,8 @@ with t3:
         )
         st.success("Targets saved ✅")
 
-st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
 
 
 st.subheader("Add what you ate")
@@ -526,5 +523,6 @@ else:
                 ["name", "quantity", "unit", "calories", "protein_g", "carbs_g", "fat_g", "confidence"]
             ].copy()
             st.dataframe(show, use_container_width=True, hide_index=True)
+
 
 

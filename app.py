@@ -82,7 +82,7 @@ def set_bg(image_path: str):
 
             /* ---- Align "Save targets" button with number inputs ---- */
             .save-targets-btn {{
-                margin-top: 23px; /* adjust 22–30 if needed */
+                margin-top: 20px; /* adjust 22–30 if needed */
             }}
 
             .save-targets-btn .stButton > button {{
@@ -537,6 +537,7 @@ else:
                 ["name", "quantity", "unit", "calories", "protein_g", "carbs_g", "fat_g", "confidence"]
             ].copy()
             st.dataframe(show, use_container_width=True, hide_index=True)
+
 
 
 

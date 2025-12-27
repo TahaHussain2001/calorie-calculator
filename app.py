@@ -78,18 +78,7 @@ def set_bg(image_path: str):
             textarea, input {{
                 border-radius: 12px !important;
             }}
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-    except FileNotFoundError:
-        st.warning("Background image not found. Put it at: bg.jpg")
-
-set_bg("bg.jpg")
-st.markdown(
-    """
-    <style>
-      /* Targets row: push the button down to align with number inputs */
+              /* Targets row: push the button down to align with number inputs */
       .targets-row [data-testid="stButton"] {
           margin-top: 26px;
       }
@@ -98,10 +87,14 @@ st.markdown(
       .targets-row .stButton > button {
           height: 42px; /* optional, looks closer to input height */
       }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+    except FileNotFoundError:
+        st.warning("Background image not found. Put it at: bg.jpg")
+
+set_bg("bg.jpg")
 
 # ---------------- DB ----------------
 def db_conn():
@@ -533,4 +526,5 @@ else:
                 ["name", "quantity", "unit", "calories", "protein_g", "carbs_g", "fat_g", "confidence"]
             ].copy()
             st.dataframe(show, use_container_width=True, hide_index=True)
+
 
